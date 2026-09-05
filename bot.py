@@ -23,7 +23,12 @@ handler = SlackRequestHandler(app)
 
 @flask_app.route("/slack/events", methods=["POST"])
 def slack_events():
-    return handler.handle(flask_app.request_class(request.environ))
+    # automatically handle slack verification
+    data = request.json
+    if data and "challenge" in data:
+        return {"challenge": data["challenge"]}
+        
+    return handler.handle(request)
 
 KVDB_URL = os.environ.get("KVDB_URL")
 DATA_KEY = "elo_data"
