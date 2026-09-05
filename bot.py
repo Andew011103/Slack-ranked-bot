@@ -23,10 +23,10 @@ handler = SlackRequestHandler(app)
 
 @flask_app.route("/slack/events", methods=["POST"])
 def slack_events():
-    # automatically handle slack verification
-    data = request.json
-    if data and "challenge" in data:
-        return {"challenge": data["challenge"]}
+    payload = request.get_json(silent=True) or {}
+    
+    if payload.get("type") == "url_verification":
+        return {"challenge": payload.get("challenge")}
         
     return handler.handle(request)
 
