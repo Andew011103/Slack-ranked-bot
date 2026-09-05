@@ -1,250 +1,125 @@
 import os
 import math
 import random
-import time
 from pathlib import Path
 from dotenv import load_dotenv
+import firebase_admin
+from firebase_admin import credentials, db
 from slack_bolt import App
-from slack_bolt.adapter.flask import SlackRequestHandler
-from flask import Flask, request
+from slack_bolt.adapter.google_cloud_functions import SlackRequestHandler
 
-import requests
-import json
 
 env_path = Path('.') / '.env'
 load_dotenv(dotenv_path=env_path)
 
-app = App(token=os.environ["SLACK_TOKEN"], signing_secret=os.environ["SIGNING_SECRET"])
+# initialize firebase admin sdk
+if not firebase_admin._apps:
+    cred_path = os.environ.get("FIREBASE_CREDENTIALS_PATH")
+
+    if cred_path and Path(cred_path).exists():
+        # local dev mode
+        cred = credentials.Certificate(cred_path)
+        firebase_admin.initialize_app(cred, {
+            'databaseURL': os.environ.get("FIREBASE_DB_URL")
+        })
+    else:
+        # serverless db mode
+        firebase_admin.initialize_app(options={
+            'databaseURL': os.environ.get("FIREBASE_DB_URL")
+        })
+
+app = App(token=os.environ["SLACK_TOKEN"], signing_secret=os.environ["SIGNING_SECRET"], process_before_response=True)
 BOT_USER_ID = app.client.auth_test()["user_id"]
 K_FACTOR = 32
+PROJECT_FOLDER = "slack-sim-bot"
 
-flask_app = Flask(__name__)
 handler = SlackRequestHandler(app)
 
-@flask_app.route("/slack/events", methods=["POST"])
-def slack_events():
-    # json handshake
-    if request.is_json:
-        payload = request.get_json(silent=True) or {}
-        if payload.get("type") == "url_verification":
-            return payload.get("challenge"), 200, {"Content-Type": "text/plain"}
-            
-    # fallback handshake
-    else:
-        # both params for validity
-        challenge_form = request.form.get("challenge") or request.args.get("challenge")
-        if challenge_form:
-            return challenge_form, 200, {"Content-Type": "text/plain"}
-            
-        # if challenge is present in teext
-        raw_body = request.get_data(as_text=True) or ""
-        if "challenge=" in raw_body:
-            try:
-                from urllib.parse import parse_qs
-                parsed = parse_qs(raw_body)
-                if "challenge" in parsed:
-                    return parsed["challenge"][0], 200, {"Content-Type": "text/plain"}
-            except Exception:
-                pass
-
-    # pass either accepted change into bolt
+def slack_bot_serverless(request):
+    """
+    All previous instance interaction handled with firebase storage. this acts as conduit for all info
+    """
     return handler.handle(request)
 
-KVDB_URL = os.environ.get("KVDB_URL")
-DATA_KEY = "elo_data"
+# all the firebase getting/setting stuff
+def get_user_elo(user_id):
+    ref = db.reference(f'{PROJECT_FOLDER}/elo_storage/{user_id}')
+    score = ref.get()
+    return score if score is not None else 1000
 
-def load_elo_data():
-    """Fetches the ELO rankings from the cloud bucket on startup."""
-    try:
-        if not KVDB_URL:
-            return {}
-        response = requests.get(f"{KVDB_URL}{DATA_KEY}")
-        if response.status_code == 200:
-            return response.json()
-    except Exception as e:
-        print(f"Error loading cloud data: {e}")
-    return {}
+def set_user_elo(user_id, score):
+    db.reference(f'{PROJECT_FOLDER}/elo_storage/{user_id}').set(score)
 
-def save_elo_data(data):
-    """Saves the entire ELO rankings dictionary back to the cloud."""
-    try:
-        if not KVDB_URL:
-            return
-        headers = {'Content-Type': 'application/json'}
-        requests.post(f"{KVDB_URL}{DATA_KEY}", data=json.dumps(data), headers=headers)
-    except Exception as e:
-        print(f"Error saving data to cloud: {e}")
+def calculate_dynamic_elo(player_elo, opponent_elo, actual_score):
+    expected_prb = 1 / (1 + math.pow(10, (opponent_elo - player_elo) / 400))
+    elo_adjustment = round(K_FACTOR * (actual_score - expected_prb), 1)
+    return elo_adjustment
 
-elo_storage = load_elo_data()
-pending_votes = {}
-match_queues = {}
-active_match_votes = {} # voting for the winner
-
-@app.event("message")
-def handle_message_events(body, logger):
-    # logger.info(body)
-    
-    # Extract the event object
-    event = body.get("event", {})
-    
-    # Extract the user ID
-    user_id = event.get("user")
-    channel_id = event.get("channel")
-    
-    # Ignore authorless messsages
-    if not user_id:
-        return
-
-    # check if bot is the sender
-    if user_id != BOT_USER_ID:
-        if not user_id in elo_storage:
-            elo_storage[user_id] = 1000
-            save_elo_data(elo_storage)
-
-@app.command("/ranked-leaderboard") # displays the current leaderboard, ranked by elo
-def leaderboard_display(ack, command, client):
+def ack_leaderboard(ack):
     ack()
 
+def process_leaderboard(command, client):
     channel_id = command.get('channel_id')
-    user_id = command.get('user_id')
+    
+    # read elo directly from fb storage bucket
+    elo_storage = db.reference(f'{PROJECT_FOLDER}/elo_storage').get() or {}
 
     if not elo_storage:
-        client.chat_postMessage(
-            channel=channel_id,
-            text="*Ranked Leaderboard*\nNo players have registered an ELO rank yet!"
-        )
+        client.chat_postMessage(channel=channel_id, text="*Ranked Leaderboard*\nNo ranked players yet!")
         return
 
-    # sorted() returns a list of tuples: [('U123', 1050), ('U456', 1000)]
-    sorted_leaderboard = sorted(
-        elo_storage.items(), 
-        key=lambda item: item[1], 
-        reverse=True
-    )
-
-    # leaderboard layout
-    leaderboard_text = " *Top Sim Players - Ranked Leaderboard*\n"
-    leaderboard_text += "‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n"
+    sorted_leaderboard = sorted(elo_storage.items(), key=lambda item: item[1], reverse=True)
+    leaderboard_text = " *Top Sim Players – Ranked Leaderboard*\n‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n"
     
-    # Add numerical placement symbols (🥇, 🥈, 🥉) for top spots
     for rank, (player_id, score) in enumerate(sorted_leaderboard, start=1):
-        if rank == 1:
-            medal = "🥇"
-        elif rank == 2:
-            medal = "🥈"
-        elif rank == 3:
-            medal = "🥉"
-        else:
-            medal = f" *{rank}.*" # Standard number for 4th place and below
-
+        medal = "🥇" if rank == 1 else "🥈" if rank == 2 else "🥉" if rank == 3 else f" *{rank}.*"
         try:
-            user_profile = client.users_info(user=player_id)
-            display_name = user_profile["user"]["profile"]["real_name"]
+            display_name = client.users_info(user=player_id)["user"]["profile"]["real_name"]
         except Exception:
-            # Fallback text if the user left the workspace or the API call fails
             display_name = f"User {player_id}"
-
-        # Medal/Position - Ping User - ELO Score
         leaderboard_text += f"{medal} *{display_name}* — `{score} ELO`\n"
 
-    client.chat_postMessage(
-        channel=channel_id,
-        text=leaderboard_text
-    )
+    client.chat_postMessage(channel=channel_id, text=leaderboard_text)
 
+app.command("/ranked-leaderboard")(ack=ack_leaderboard, lazy=[process_leaderboard])
 
-
-@app.command("/q-list")
-def q_list(ack, command, client):
+def ack_q_voting(ack):
     ack()
 
-    channel_id = command.get('channel_id')
-
-    # fetch queue, default empty list if nonexistant
-    current_queue = pending_votes.get(channel_id, [])
-    
-    if not current_queue:
-        client.chat_postMessage(channel=channel_id, text="The queue is currently empty!")
-    else:
-        client.chat_postMessage(channel=channel_id, text=f"Current queue: {current_queue}")
-
-# voting for desired game specs (pre-match)
-@app.command("/q-voting")
-def handle_q_voting(ack, command, client):
-    ack()
-
+def process_q_voting(command, client):
     channel_id = command.get('channel_id')
     user_id = command.get('user_id')
-    raw_text = command.get('text', '').strip() # arguments
-
-    # multiple arguments (/q-voting <simulation type> <robot type>)
-    args = raw_text.split()
-
-
-    if not raw_text:
-        # Handle case where user forgot to add arguments
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text="Invalid Command; Lacking Arguments! Ex: `/q-voting MoSim 4414`"
-        )
-        return
+    args = command.get('text', '').strip().split()
 
     if len(args) < 2:
-            client.chat_postEphemeral(
-                channel=channel_id,
-                user=user_id,
-                text="Please provide the Simulation Type (Ex: MoSim, CloSim, xRC) and Robot Number (Ex: 4414, 1678, 1706) separated by a space for your vote"
-            )
-            return
-
-    if channel_id not in pending_votes:
-        pending_votes[channel_id] = []
-
-    if any(submission["user"] == user_id for submission in pending_votes[channel_id]):
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text="Already submitted your arguments! Waiting for an opponent..."
-        )
+        client.chat_postEphemeral(channel=channel_id, user=user_id, text="Lacking Arguments! Ex: `/q-voting MoSim 4414`")
         return
 
-    pending_votes[channel_id].append({
-        "user": user_id,
-        "args": args
-    })
+    queue_ref = db.reference(f'{PROJECT_FOLDER}/pending_votes/{channel_id}')
+    current_queue = queue_ref.get() or []
 
-    current_count = len(pending_votes[channel_id])
+    if any(sub["user"] == user_id for sub in current_queue):
+        client.chat_postEphemeral(channel=channel_id, user=user_id, text="Already waiting in queue...")
+        return
 
-    client.chat_postEphemeral(
-        channel=channel_id, 
-        user=user_id, 
-        text=f"You have queued for *{args[0]}* {args[1]}")
+    current_queue.append({"user": user_id, "args": args})
+    queue_ref.set(current_queue)
+    
+    client.chat_postEphemeral(channel=channel_id, user=user_id, text=f"You queued for *{args[0]}* ({args[1]})")
 
-    if len(pending_votes[channel_id]) == 1:
+    if len(current_queue) == 1:
         client.chat_postMessage(
             channel=channel_id,
-            text=f"*<@{user_id}> has queued!* Queue for Vote 1v1 is now *[{current_count}/2]*\nRun `/q-voting arg1 arg2` to enter!"
+            text=f"*<@{user_id}> has queued!* Queue is now *[1/2]*\nRun `/q-voting arg1 arg2` to enter!"
         )
         return
 
-    # second user submits, picking match specs
-    if len(pending_votes[channel_id]) == 2:
-        player1 = pending_votes[channel_id][0]
-        player2 = pending_votes[channel_id][1]
+    elif len(current_queue) == 2:
+        player1, player2 = current_queue[0], current_queue[1]
+        winner, loser = (player1, player2) if random.randint(0, 1) == 0 else (player2, player1)
 
-        match_vote = random.randint(0, 1)
-        
-        if match_vote == 0:
-            winner = player1
-            loser = player2
-        else:
-            winner = player2
-            loser = player1
-
-        # get scores with default value 1000 if none exists
-        winner_elo = elo_storage.get(winner['user'], 1000)
-        loser_elo = elo_storage.get(loser['user'], 1000)
+        winner_elo = get_user_elo(winner['user'])
+        loser_elo = get_user_elo(loser['user'])
 
         client.chat_postMessage(
             channel=channel_id,
@@ -257,167 +132,74 @@ def handle_q_voting(ack, command, client):
             )
         )
 
-        # post match stuff starts here
-        winner_profile = client.users_info(user=winner['user'])
-        winner_name = winner_profile["user"]["profile"]["real_name"]
+        winner_name = client.users_info(user=winner['user'])["user"]["profile"]["real_name"]
+        loser_name = client.users_info(user=loser['user'])["user"]["profile"]["real_name"]
 
-        loser_profile = client.users_info(user=loser['user'])
-        loser_name = loser_profile["user"]["profile"]["real_name"]
-
-        # ids are used to ping the winner/loser
-        winner_id = winner['user']
-        loser_id = loser['user']
-
-        # three button array
         confirmation_blocks = [
             {
                 "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*Vote for the Winner of the Match*\n 🟥 *Red:* <@{winner_id}>\n 🟦 *Blue:* <@{loser_id}>\n\n"
-                }
+                "text": {"type": "mrkdwn", "text": f"*Vote for the Winner*\n 🟥 *Red:* <@{winner['user']}>\n 🟦 *Blue:* <@{loser['user']}>\n\n"}
             },
             {
                 "type": "actions",
                 "block_id": "match_confirmation_zone",
                 "elements": [
-                    {
-                        "type": "button",
-                        "text": {
-                            "type": "plain_text",
-                            "text": f"Confirm {winner_name} win",
-                            "emoji": True
-                        },
-                        "style": "primary",
-                        "value": f"{winner_id}_{loser_id}",
-                        "action_id": "confirm_winner_button"
-                    },
-                    {
-                        "type": "button",
-                        "text": {
-                            "type": "plain_text",
-                            "text": f"Confirm {loser_name} win",
-                            "emoji": True
-                        },
-                        "value": f"{loser_id}_{winner_id}",
-                        "action_id": "confirm_loser_button"
-                    }
+                    {"type": "button", "text": {"type": "plain_text", "text": f"Confirm {winner_name} win"}, "style": "primary", "value": f"{winner['user']}_{loser['user']}", "action_id": "confirm_winner_button"},
+                    {"type": "button", "text": {"type": "plain_text", "text": f"Confirm {loser_name} win"}, "value": f"{loser['user']}_{winner['user']}", "action_id": "confirm_loser_button"}
                 ]
             }
         ]
 
-        # delivering the layout confirmation block
-        client.chat_postMessage(
-            channel=channel_id,
-            text="Awaiting verification confirmations...",
-            blocks=confirmation_blocks
-        )
+        client.chat_postMessage(channel=channel_id, text="Awaiting confirmations...", blocks=confirmation_blocks)
+        
+        queue_ref.delete()
+        return
 
-        del pending_votes[channel_id]
+app.command("/q-voting")(ack=ack_q_voting, lazy=[process_q_voting])
 
-def calculate_dynamic_elo(player_elo, opponent_elo, actual_score):
-
-
-    """
-    actual_score is always 1 for a win, 0 for a loss.
-    returns elo adjustment value of any real number
-    """
-    # 1. Calculate Expected Win Probability for the player
-    expected_prb = 1 / (1 + math.pow(10, (opponent_elo - player_elo) / 400))
-    
-    # 2. Calculate point difference outcome scale
-    elo_adjustment = round(K_FACTOR * (actual_score - expected_prb), 1)
-    return elo_adjustment
-
-# handles confirm <> won button
-@app.action("confirm_winner_button")
-def handle_winner_confirmation(ack, body, client):
+def ack_action(ack):
     ack()
+
+def process_confirmation(body, client):
     clicking_user = body["user"]["id"]
     channel_id = body["channel"]["id"]
     message_ts = body["message"]["ts"]
     winner_id, loser_id = body["actions"][0]["value"].split("_")
 
     if clicking_user not in [winner_id, loser_id]:
-        client.chat_postEphemeral(channel=channel_id, user=clicking_user, text="You are an external player of this match!")
+        client.chat_postEphemeral(channel=channel_id, user=clicking_user, text="You are not a player in this match!")
         return
 
-    if message_ts not in active_match_votes:
-        active_match_votes[message_ts] = {"users": []}
-        
-    if clicking_user in active_match_votes[message_ts]["users"]:
-        client.chat_postEphemeral(channel=channel_id, user=clicking_user, text="Waiting on opponent confirmation click...")
-        return
-        
-    active_match_votes[message_ts]["users"].append(clicking_user)
+    # Track votes on Firebase
+    vote_ref = db.reference(f'{PROJECT_FOLDER}/active_match_votes/{message_ts}')
 
+    def append_user_transaction(current_list):
+        if current_list is None:
+            current_list = []
+        if clicking_user not in current_list:
+            current_list.append(clicking_user)
+        return current_list
 
-    # Execute math adjustments once both players approve
-    if len(active_match_votes[message_ts]["users"]) == 2:
-        # Fetch current ELO ratings
-        w_current = elo_storage.get(winner_id, 1000)
-        l_current = elo_storage.get(loser_id, 1000)
-
-        # dynamic elo shifts
-        w_change = calculate_dynamic_elo(w_current, l_current, actual_score=1.0) # Win outcome
-        l_change = calculate_dynamic_elo(l_current, w_current, actual_score=0.0) # Loss outcome
-
-        # update global database dict fields
-        elo_storage[winner_id] = w_current + w_change
-        elo_storage[loser_id] = max(0, l_current + l_change) # Enforce floor limit boundary
-
-        save_elo_data(elo_storage)
-
-        client.chat_update(
-            channel=channel_id,
-            ts=message_ts,
-            blocks=[{
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"*Match Results Verified!*\n"
-                        f"🟥 *Red:* <@{winner_id}> wins! (`+{w_change}` ELO) | `{elo_storage[winner_id]}`\n"
-                        f"🟦 *Blue:* <@{loser_id}> loses! (`{l_change}` ELO) | `{elo_storage[loser_id]}`"
-                    )
-                }
-            }]
-        )
-        del active_match_votes[message_ts]
-
-# handles specs loser win
-@app.action("confirm_loser_button")
-def handle_loser_confirmation(ack, body, client):
-    ack()
-    clicking_user = body["user"]["id"]
-    channel_id = body["channel"]["id"]
-    message_ts = body["message"]["ts"]
-    actual_winner_id, actual_loser_id = body["actions"][0]["value"].split("_")
-
-    if clicking_user not in [actual_winner_id, actual_loser_id]:
-        client.chat_postEphemeral(channel=channel_id, user=clicking_user, text="You are an external player of this match!")
+    try:
+        # automatically runs inside fb
+        updated_users = vote_ref.transaction(append_user_transaction)
+    except Exception as e:
+        client.chat_postEphemeral(channel=channel_id, user=clicking_user, text="Request was not fulfilled. Please click again!")
         return
 
-    if message_ts not in active_match_votes:
-        active_match_votes[message_ts] = {"users": []}
-        
-    if clicking_user in active_match_votes[message_ts]["users"]:
-        client.chat_postEphemeral(channel=channel_id, user=clicking_user, text="Waiting on opponent confirmation click...")
-        return
-        
-    active_match_votes[message_ts]["users"].append(clicking_user)
+    if updated_users.count(clicking_user) > 1:
+         client.chat_postEphemeral(channel=channel_id, user=clicking_user, text="Waiting on opponent confirmation...")
+         return
 
-    if len(active_match_votes[message_ts]["users"]) == 2:
-        w_current = elo_storage.get(actual_winner_id, 1000)
-        l_current = elo_storage.get(actual_loser_id, 1000)
+    if len(updated_users) == 2:
+        w_current = get_user_elo(winner_id)
+        l_current = get_user_elo(loser_id)
 
         w_change = calculate_dynamic_elo(w_current, l_current, actual_score=1.0)
         l_change = calculate_dynamic_elo(l_current, w_current, actual_score=0.0)
 
-        elo_storage[actual_winner_id] = w_current + w_change
-        elo_storage[actual_loser_id] = max(0, l_current + l_change)
-
-        save_elo_data(elo_storage)
+        set_user_elo(winner_id, w_current + w_change)
+        set_user_elo(loser_id, max(0, l_current + l_change))
 
         client.chat_update(
             channel=channel_id,
@@ -426,26 +208,47 @@ def handle_loser_confirmation(ack, body, client):
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": (
-                        f"*Match Results Verified!*\n"
-                        f"🟥 *Red:* <@{actual_winner_id}> wins! (`+{w_change}` ELO) | `{elo_storage[actual_winner_id]}`\n"
-                        f"🟦 *Blue:* <@{actual_loser_id}> loses! (`{l_change}` ELO) | `{elo_storage[actual_loser_id]}`"
-                    )
+                    "text": f"*Match Results Verified!*\n🟥 <@{winner_id}> wins! (`+{w_change}`) | `{w_current + w_change}`\n🟦 <@{loser_id}> loses! (`{l_change}`) | `{max(0, l_current + l_change)}`"
                 }
             }]
         )
-        del active_match_votes[message_ts]
+        vote_ref.delete()
 
+app.action("confirm_winner_button")(ack=ack_action, lazy=[process_confirmation])
+app.action("confirm_loser_button")(ack=ack_action, lazy=[process_confirmation])
 
-@app.command("/leaveall")
-def leaveall(ack, command, client):
+def ack_q_list(ack):
     ack()
 
+def process_q_list(command, client):
+    channel_id = command.get('channel_id')
+
+    # queue state read from firebase
+    current_queue = db.reference(f'{PROJECT_FOLDER}/pending_votes/{channel_id}').get() or []
+    
+    if not current_queue:
+        client.chat_postMessage(channel=channel_id, text="The queue is currently empty!")
+    else:
+        queue_msg = "*Active Queue:*\n"
+        for index, item in enumerate(current_queue, start=1):
+            queue_msg += f"{index}. <@{item['user']}> — `{item['args'][0]}` ({item['args'][1]})\n"
+        client.chat_postMessage(channel=channel_id, text=queue_msg)
+
+app.command("/q-list")(ack=ack_q_list, lazy=[process_q_list])
+
+def ack_leaveall(ack):
+    ack()
+
+def process_leaveall(command, client):
     channel_id = command.get('channel_id')
     user_id = command.get('user_id')
+    
+    # fb lookup
+    queue_ref = db.reference(f'{PROJECT_FOLDER}/pending_votes/{channel_id}')
+    current_queue = queue_ref.get() or []
 
-    # checks if command is executable in current channel
-    if channel_id not in pending_votes or not pending_votes[channel_id]:
+    # check if no channel queue
+    if not current_queue:
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
@@ -453,9 +256,8 @@ def leaveall(ack, command, client):
         )
         return
 
-    # checks if user is in a queue for this channel
-    user_in_queue = any(submission["user"] == user_id for submission in pending_votes[channel_id])
-
+    # check if user in queue
+    user_in_queue = any(submission["user"] == user_id for submission in current_queue)
     if not user_in_queue:
         client.chat_postEphemeral(
             channel=channel_id,
@@ -464,22 +266,20 @@ def leaveall(ack, command, client):
         )
         return
 
-    # recreates queue without the user's entry
-    pending_votes[channel_id] = [
-        submission for submission in pending_votes[channel_id] 
-        if submission["user"] != user_id
-    ]
+    # update firebase for player who left
+    updated_queue = [sub for sub in current_queue if sub["user"] != user_id]
 
-    current_count = len(pending_votes[channel_id]) # counting for the updated queue size
+    if not updated_queue:
+        queue_ref.delete()
+    else:
+        queue_ref.set(updated_queue)
 
-    # broadcast queue status change
+    current_count = len(updated_queue)
+
+    # updated status to channel
     client.chat_postMessage(
         channel=channel_id, 
         text=f"*<@{user_id}> has left the queue.* Queue for Vote 1v1 is now *[{current_count}/2]*\nRun `/q-voting arg1 arg2` to enter!"
     )
 
-
-if __name__ == "__main__":
-    # render binds dynamic port ranges automatically
-    port = int(os.environ.get("PORT", 3000))
-    flask_app.run(host="0.0.0.0", port=port)
+app.command("/leaveall")(ack=ack_leaveall, lazy=[process_leaveall])
