@@ -23,18 +23,31 @@ handler = SlackRequestHandler(app)
 
 @flask_app.route("/slack/events", methods=["POST"])
 def slack_events():
-    raw_body = request.get_data(as_text=True) or ""
-    
-    try:
-        payload = json.loads(raw_body)
-        
+    # json handshake
+    if request.is_json:
+        payload = request.get_json(silent=True) or {}
         if payload.get("type") == "url_verification":
-            challenge_value = payload.get("challenge")
-            return challenge_value, 200, {"Content-Type": "text/plain"}
+            return payload.get("challenge"), 200, {"Content-Type": "text/plain"}
             
-    except Exception as e:
-        print(f"Handshake interceptor parsing error: {e}")
+    # fallback handshake
+    else:
+        # both params for validity
+        challenge_form = request.form.get("challenge") or request.args.get("challenge")
+        if challenge_form:
+            return challenge_form, 200, {"Content-Type": "text/plain"}
+            
+        # if challenge is present in teext
+        raw_body = request.get_data(as_text=True) or ""
+        if "challenge=" in raw_body:
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(raw_body)
+                if "challenge" in parsed:
+                    return parsed["challenge"][0], 200, {"Content-Type": "text/plain"}
+            except Exception:
+                pass
 
+    # pass either accepted change into bolt
     return handler.handle(request)
 
 KVDB_URL = os.environ.get("KVDB_URL")
