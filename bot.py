@@ -23,7 +23,7 @@ handler = SlackRequestHandler(app)
 
 @flask_app.route("/slack/events", methods=["POST"])
 def slack_events():
-    return handler.handle(request)
+    return handler.handle(flask_app.request_class(request.environ))
 
 KVDB_URL = os.environ.get("KVDB_URL")
 DATA_KEY = "elo_data"
