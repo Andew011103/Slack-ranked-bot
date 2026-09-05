@@ -23,11 +23,18 @@ handler = SlackRequestHandler(app)
 
 @flask_app.route("/slack/events", methods=["POST"])
 def slack_events():
-    payload = request.get_json(silent=True) or {}
+    raw_body = request.get_data(as_text=True) or ""
     
-    if payload.get("type") == "url_verification":
-        return {"challenge": payload.get("challenge")}
+    try:
+        payload = json.loads(raw_body)
         
+        if payload.get("type") == "url_verification":
+            challenge_value = payload.get("challenge")
+            return challenge_value, 200, {"Content-Type": "text/plain"}
+            
+    except Exception as e:
+        print(f"Handshake interceptor parsing error: {e}")
+
     return handler.handle(request)
 
 KVDB_URL = os.environ.get("KVDB_URL")
