@@ -1,10 +1,15 @@
 import os
 import math
 import random
+import time
 from pathlib import Path
 from dotenv import load_dotenv
 from slack_bolt import App
-from slack_bolt.adapter.socket_mode import SocketModeHandler
+from slack_bolt.adapter.flask import SlackRequestHandler
+from flask import Flask, request
+
+import requests
+import json
 
 env_path = Path('.') / '.env'
 load_dotenv(dotenv_path=env_path)
@@ -13,10 +18,41 @@ app = App(token=os.environ["SLACK_TOKEN"], signing_secret=os.environ["SIGNING_SE
 BOT_USER_ID = app.client.auth_test()["user_id"]
 K_FACTOR = 32
 
-elo_storage = {}
+flask_app = Flask(__name__)
+handler = SlackRequestHandler(app)
+
+@flask_app.route("/slack/events", methods=["POST"])
+def slack_events():
+    return handler.handle(request)
+
+KVDB_URL = os.environ.get("KVDB_URL")
+DATA_KEY = "elo_data"
+
+def load_elo_data():
+    """Fetches the ELO rankings from the cloud bucket on startup."""
+    try:
+        if not KVDB_URL:
+            return {}
+        response = requests.get(f"{KVDB_URL}{DATA_KEY}")
+        if response.status_code == 200:
+            return response.json()
+    except Exception as e:
+        print(f"Error loading cloud data: {e}")
+    return {}
+
+def save_elo_data(data):
+    """Saves the entire ELO rankings dictionary back to the cloud."""
+    try:
+        if not KVDB_URL:
+            return
+        headers = {'Content-Type': 'application/json'}
+        requests.post(f"{KVDB_URL}{DATA_KEY}", data=json.dumps(data), headers=headers)
+    except Exception as e:
+        print(f"Error saving data to cloud: {e}")
+
+elo_storage = load_elo_data()
 pending_votes = {}
 match_queues = {}
-
 active_match_votes = {} # voting for the winner
 
 @app.event("message")
@@ -38,6 +74,7 @@ def handle_message_events(body, logger):
     if user_id != BOT_USER_ID:
         if not user_id in elo_storage:
             elo_storage[user_id] = 1000
+            save_elo_data(elo_storage)
 
 @app.command("/ranked-leaderboard") # displays the current leaderboard, ranked by elo
 def leaderboard_display(ack, command, client):
@@ -300,9 +337,11 @@ def handle_winner_confirmation(ack, body, client):
         w_change = calculate_dynamic_elo(w_current, l_current, actual_score=1.0) # Win outcome
         l_change = calculate_dynamic_elo(l_current, w_current, actual_score=0.0) # Loss outcome
 
-        # Update global database dict fields
+        # update global database dict fields
         elo_storage[winner_id] = w_current + w_change
         elo_storage[loser_id] = max(0, l_current + l_change) # Enforce floor limit boundary
+
+        save_elo_data(elo_storage)
 
         client.chat_update(
             channel=channel_id,
@@ -352,6 +391,8 @@ def handle_loser_confirmation(ack, body, client):
 
         elo_storage[actual_winner_id] = w_current + w_change
         elo_storage[actual_loser_id] = max(0, l_current + l_change)
+
+        save_elo_data(elo_storage)
 
         client.chat_update(
             channel=channel_id,
@@ -414,5 +455,6 @@ def leaveall(ack, command, client):
 
 
 if __name__ == "__main__":
-    handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
-    handler.start()
+    # render binds dynamic port ranges automatically
+    port = int(os.environ.get("PORT", 3000))
+    flask_app.run(host="0.0.0.0", port=port)
