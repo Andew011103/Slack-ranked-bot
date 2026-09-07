@@ -283,3 +283,4 @@ def process_leaveall(command, client):
     )
 
 app.command("/leaveall")(ack=ack_leaveall, lazy=[process_leaveall])
+handler_app = handler
