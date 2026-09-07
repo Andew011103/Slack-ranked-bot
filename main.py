@@ -283,7 +283,3 @@ def process_leaveall(command, client):
     )
 
 slack_app.command("/leaveall")(ack=ack_leaveall, lazy=[process_leaveall])
-
-def main_handler(request):
-    """universal entry point for google cloud"""
-    return app(request)
