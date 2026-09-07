@@ -28,7 +28,7 @@ if not firebase_admin._apps:
             'databaseURL': db_url
         })
 
-app = App(token=os.environ["SLACK_TOKEN"], signing_secret=os.environ["SIGNING_SECRET"], process_before_response=True)
+app = App(token=os.environ["SLACK_TOKEN"], signing_secret=os.environ["SIGNING_SECRET"], process_before_response=False)
 BOT_USER_ID = app.client.auth_test()["user_id"]
 K_FACTOR = 32
 PROJECT_FOLDER = "slack-sim-bot"

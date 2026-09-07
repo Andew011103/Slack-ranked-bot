@@ -1,3 +1,4 @@
-slack_bolt>=1.18.0
-firebase-admin>=6.2.0
+firebase-admin>=6.5.0
+slack-bolt>=1.18.0
 functions-framework>=3.0.0
+python-dotenv>=1.0.0
