@@ -39,7 +39,11 @@ except Exception as e:
     BOT_USER_ID = None
 
 
-app = SlackRequestHandler(slack_app)
+handler = SlackRequestHandler(slack_app)
+
+def app(request):
+    """Universal callable entry point function for Google Cloud Run."""
+    return handler.handle(request)
 
 # all the firebase getting/setting stuff
 def get_user_elo(user_id):
