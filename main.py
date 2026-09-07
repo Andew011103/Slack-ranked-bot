@@ -8,24 +8,24 @@ from firebase_admin import credentials, db
 from slack_bolt import App
 from slack_bolt.adapter.google_cloud_functions import SlackRequestHandler
 
-
 env_path = Path('.') / '.env'
 load_dotenv(dotenv_path=env_path)
 
-# initialize firebase admin sdk
+# initialize fb admin sdk
 if not firebase_admin._apps:
     cred_path = os.environ.get("FIREBASE_CREDENTIALS_PATH")
+    db_url = os.environ.get("FIREBASE_DB_URL")  
 
     if cred_path and Path(cred_path).exists():
         # local dev mode
         cred = credentials.Certificate(cred_path)
         firebase_admin.initialize_app(cred, {
-            'databaseURL': os.environ.get("FIREBASE_DB_URL")
+            'databaseURL': db_url
         })
     else:
-        # serverless db mode
+        # google cloud mode
         firebase_admin.initialize_app(options={
-            'databaseURL': os.environ.get("FIREBASE_DB_URL")
+            'databaseURL': db_url
         })
 
 app = App(token=os.environ["SLACK_TOKEN"], signing_secret=os.environ["SIGNING_SECRET"], process_before_response=True)
