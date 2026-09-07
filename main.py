@@ -28,24 +28,24 @@ if not firebase_admin._apps:
             'databaseURL': db_url
         })
 
-app = App(token=os.environ["SLACK_TOKEN"], signing_secret=os.environ["SIGNING_SECRET"], process_before_response=False)
+slack_app = App(token=os.environ["SLACK_TOKEN"], signing_secret=os.environ["SIGNING_SECRET"], process_before_response=False)
 K_FACTOR = 32
 PROJECT_FOLDER = "slack-sim-bot"
 
 try:
-    BOT_USER_ID = app.client.auth_test()["user_id"]
+    BOT_USER_ID = slack_app.client.auth_test()["user_id"]
 except Exception as e:
     print(f"Warning: Could not fetch BOT_USER_ID during startup: {e}")
     BOT_USER_ID = None
 
 
-handler = SlackRequestHandler(app)
+app = SlackRequestHandler(slack_app)
 
 def slack_bot_serverless(request):
     """
     All previous instance interaction handled with firebase storage. this acts as conduit for all info
     """
-    return handler.handle(request)
+    return app.handle(request)
 
 # all the firebase getting/setting stuff
 def get_user_elo(user_id):
@@ -87,7 +87,7 @@ def process_leaderboard(command, client):
 
     client.chat_postMessage(channel=channel_id, text=leaderboard_text)
 
-app.command("/ranked-leaderboard")(ack=ack_leaderboard, lazy=[process_leaderboard])
+slack_app.command("/ranked-leaderboard")(ack=ack_leaderboard, lazy=[process_leaderboard])
 
 def ack_q_voting(ack):
     ack()
@@ -161,7 +161,7 @@ def process_q_voting(command, client):
         queue_ref.delete()
         return
 
-app.command("/q-voting")(ack=ack_q_voting, lazy=[process_q_voting])
+slack_app.command("/q-voting")(ack=ack_q_voting, lazy=[process_q_voting])
 
 def ack_action(ack):
     ack()
@@ -220,8 +220,8 @@ def process_confirmation(body, client):
         )
         vote_ref.delete()
 
-app.action("confirm_winner_button")(ack=ack_action, lazy=[process_confirmation])
-app.action("confirm_loser_button")(ack=ack_action, lazy=[process_confirmation])
+slack_app.action("confirm_winner_button")(ack=ack_action, lazy=[process_confirmation])
+slack_app.action("confirm_loser_button")(ack=ack_action, lazy=[process_confirmation])
 
 def ack_q_list(ack):
     ack()
@@ -240,7 +240,7 @@ def process_q_list(command, client):
             queue_msg += f"{index}. <@{item['user']}> — `{item['args'][0]}` ({item['args'][1]})\n"
         client.chat_postMessage(channel=channel_id, text=queue_msg)
 
-app.command("/q-list")(ack=ack_q_list, lazy=[process_q_list])
+slack_app.command("/q-list")(ack=ack_q_list, lazy=[process_q_list])
 
 def ack_leaveall(ack):
     ack()
@@ -288,5 +288,4 @@ def process_leaveall(command, client):
         text=f"*<@{user_id}> has left the queue.* Queue for Vote 1v1 is now *[{current_count}/2]*\nRun `/q-voting arg1 arg2` to enter!"
     )
 
-app.command("/leaveall")(ack=ack_leaveall, lazy=[process_leaveall])
-handler_app = handler
+slack_app.command("/leaveall")(ack=ack_leaveall, lazy=[process_leaveall])
