@@ -41,12 +41,6 @@ except Exception as e:
 
 app = SlackRequestHandler(slack_app)
 
-def slack_bot_serverless(request):
-    """
-    All previous instance interaction handled with firebase storage. this acts as conduit for all info
-    """
-    return app.handle(request)
-
 # all the firebase getting/setting stuff
 def get_user_elo(user_id):
     ref = db.reference(f'{PROJECT_FOLDER}/elo_storage/{user_id}')
@@ -289,3 +283,7 @@ def process_leaveall(command, client):
     )
 
 slack_app.command("/leaveall")(ack=ack_leaveall, lazy=[process_leaveall])
+
+def main_handler(request):
+    """universal entry point for google cloud"""
+    return app(request)
