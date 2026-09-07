@@ -29,9 +29,15 @@ if not firebase_admin._apps:
         })
 
 app = App(token=os.environ["SLACK_TOKEN"], signing_secret=os.environ["SIGNING_SECRET"], process_before_response=False)
-BOT_USER_ID = app.client.auth_test()["user_id"]
 K_FACTOR = 32
 PROJECT_FOLDER = "slack-sim-bot"
+
+try:
+    BOT_USER_ID = app.client.auth_test()["user_id"]
+except Exception as e:
+    print(f"Warning: Could not fetch BOT_USER_ID during startup: {e}")
+    BOT_USER_ID = None
+
 
 handler = SlackRequestHandler(app)
 
