@@ -43,7 +43,7 @@ except Exception as e:
 handler = SlackRequestHandler(slack_app)
 
 def app(environ, start_response):
-    """so WSGI needs 2 inputs, and 1 challenge if securing an event subscription url"""
+    """WSGI needs 2 inputs, and 1 challenge if securing an event subscription url"""
 
     try:
         request_body_size = int(environ.get('CONTENT_LENGTH', 0))
@@ -55,16 +55,20 @@ def app(environ, start_response):
         
         payload = json.loads(request_body)
         
-        # Gives slack completed verification challenge
+        # gives slack completed verification challenge
         if payload.get("type") == "url_verification":
             challenge = payload.get("challenge")
             status = '200 OK'
-            response_headers = [('Content-Type', 'text/plain'), ('Content-Length', str(len(challenge)))]
+            response_headers = [
+                ('Content-Type', 'text/plain'), 
+                ('Content-Length', str(len(challenge)))
+            ]
             start_response(status, response_headers)
             return [challenge.encode('utf-8')]
             
-    except Exception:
+    except Exception as e:
         # ignore if not a verification challenge
+        print(f"Error checking verification payload: {e}")
         pass
 
     # standard return during workspace
