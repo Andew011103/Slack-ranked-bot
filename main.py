@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, db
 from slack_bolt import App
-from slack_bolt.adapter.google_cloud_functions import SlackRequestHandler
+from slack_bolt.adapter.wsgi import SlackRequestHandler
 
 env_path = Path('.') / '.env'
 load_dotenv(dotenv_path=env_path)
@@ -43,7 +43,7 @@ handler = SlackRequestHandler(slack_app)
 
 def app(environ, start_response):
     """so WSGI needs 2 inputs"""
-    return handler.handle(environ, start_response)
+    return handler(environ, start_response)
 
 # all the firebase getting/setting stuff
 def get_user_elo(user_id):
