@@ -41,9 +41,9 @@ except Exception as e:
 
 handler = SlackRequestHandler(slack_app)
 
-def app(request):
-    """Universal callable entry point function for Google Cloud Run."""
-    return handler.handle(request)
+def app(environ, start_response):
+    """so WSGI needs 2 inputs"""
+    return handler.handle(environ, start_response)
 
 # all the firebase getting/setting stuff
 def get_user_elo(user_id):
