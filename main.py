@@ -1,6 +1,7 @@
 import os
 import math
 import random
+import json
 from pathlib import Path
 from dotenv import load_dotenv
 import firebase_admin
@@ -42,7 +43,31 @@ except Exception as e:
 handler = SlackRequestHandler(slack_app)
 
 def app(environ, start_response):
-    """so WSGI needs 2 inputs"""
+    """so WSGI needs 2 inputs, and 1 challenge if securing an event subscription url"""
+
+    try:
+        request_body_size = int(environ.get('CONTENT_LENGTH', 0))
+        request_body = environ['wsgi.input'].read(request_body_size).decode('utf-8')
+        
+        # rewind body stream so the SlackRequestHandler can still read it if needed
+        from io import BytesIO
+        environ['wsgi.input'] = BytesIO(request_body.encode('utf-8'))
+        
+        payload = json.loads(request_body)
+        
+        # Gives slack completed verification challenge
+        if payload.get("type") == "url_verification":
+            challenge = payload.get("challenge")
+            status = '200 OK'
+            response_headers = [('Content-Type', 'text/plain'), ('Content-Length', str(len(challenge)))]
+            start_response(status, response_headers)
+            return [challenge.encode('utf-8')]
+            
+    except Exception:
+        # ignore if not a verification challenge
+        pass
+
+    # standard return during workspace
     return handler(environ, start_response)
 
 # all the firebase getting/setting stuff
