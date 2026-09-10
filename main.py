@@ -197,34 +197,53 @@ def process_confirmation(body, client):
     clicking_user = body["user"]["id"]
     channel_id = body["channel"]["id"]
     message_ts = body["message"]["ts"]
-    winner_id, loser_id = body["actions"][0]["value"].split("_")
+    
+    # removes illegal characters (. for now)
+    safe_ts_key = str(message_ts).replace('.', '_')
+    
+    # extract winner and loser id from the value
+    choice_winner_id, choice_loser_id = body["actions"][0]["value"].split("_")
 
-    if clicking_user not in [winner_id, loser_id]:
+    if clicking_user not in [choice_winner_id, choice_loser_id]:
         client.chat_postEphemeral(channel=channel_id, user=clicking_user, text="You are not a player in this match!")
         return
 
-    # Track votes on Firebase
-    vote_ref = db.reference(f'{PROJECT_FOLDER}/active_match_votes/{message_ts}')
+    # track votes on fb
+    vote_ref = db.reference(f'{PROJECT_FOLDER}/active_match_votes/{safe_ts_key}')
 
-    def append_user_transaction(current_list):
-        if current_list is None:
-            current_list = []
-        if clicking_user not in current_list:
-            current_list.append(clicking_user)
-        return current_list
+    def append_user_transaction(current_data):
+        if current_data is None:
+            current_data = {"votes": [], "winner_voted": choice_winner_id, "loser_voted": choice_loser_id}
+        
+        votes = current_data.get("votes", [])
+        if clicking_user not in votes:
+            votes.append(clicking_user)
+        
+        current_data["votes"] = votes
+        return current_data
 
     try:
         # automatically runs inside fb
-        updated_users = vote_ref.transaction(append_user_transaction)
+        transaction_result = vote_ref.transaction(append_user_transaction)
+        
+        # takes data from node reference
+        updated_node = vote_ref.get()
+        voters = updated_node.get("votes", [])
     except Exception as e:
+        print(f"Transaction Exception: {e}")
         client.chat_postEphemeral(channel=channel_id, user=clicking_user, text="Request was not fulfilled. Please click again!")
         return
 
-    if updated_users.count(clicking_user) > 1:
-         client.chat_postEphemeral(channel=channel_id, user=clicking_user, text="Waiting on opponent confirmation...")
+    # Check match status conditions
+    if len(voters) == 1:
+         client.chat_postEphemeral(channel=channel_id, user=clicking_user, text="Your vote has been sent. Waiting on opponent confirmation...")
          return
 
-    if len(updated_users) == 2:
+    if len(voters) == 2:
+        # Pulling original identities from the first instance data node
+        winner_id = updated_node.get("winner_voted")
+        loser_id = updated_node.get("loser_voted")
+
         w_current = get_user_elo(winner_id)
         l_current = get_user_elo(loser_id)
 
