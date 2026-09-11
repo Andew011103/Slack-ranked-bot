@@ -32,6 +32,7 @@ if not firebase_admin._apps:
 slack_app = App(token=os.environ["SLACK_TOKEN"], signing_secret=os.environ["SIGNING_SECRET"], process_before_response=False)
 K_FACTOR = 32
 PROJECT_FOLDER = "slack-sim-bot"
+admin_ids = {}
 
 try:
     BOT_USER_ID = slack_app.client.auth_test()["user_id"]
@@ -268,6 +269,46 @@ def process_confirmation(body, client):
 
 slack_app.action("confirm_winner_button")(ack=ack_action, lazy=[process_confirmation])
 slack_app.action("confirm_loser_button")(ack=ack_action, lazy=[process_confirmation])
+
+def ack_leaderboard_wipe(ack):
+    ack()
+
+def process_leaderboard_wipe(command, client):
+    channel_id = command.get('channel_id')
+    user_id = command.get('user_id')
+
+    if user_id not in admin_ids:
+        client.chat_postEphemeral(channel=channel_id, user=user_id, text="Only admins can wipe the leaderboard.")
+        return
+
+    elo_ref = db.reference(f'{PROJECT_FOLDER}/elo_storage')
+    existing = elo_ref.get() or {}
+
+    if not existing:
+        client.chat_postMessage(channel=channel_id, text="Leaderboard empty! — nothing to wipe.")
+        return
+
+    elo_ref.delete()
+
+    client.chat_postMessage(
+        channel=channel_id,
+        text=f"*Ranked leaderboard has been wiped* All {len(existing)} player(s)' ELO scores were reset."
+    )
+
+slack_app.command("/leaderboard-wipe")(ack=ack_leaderboard_wipe, lazy=[process_leaderboard_wipe])
+
+def ack_register_admin(ack):
+    ack()
+
+def process_register_admin(command, client):
+    channel_id = command.get('channel_id')
+    args = command.get('text', '').strip().split()
+
+    admin_ids.append(args[0])
+
+    client.chat_postMessage(channel=channel_id, text="Promoted a new admin!")
+
+slack_app.command("/register-admin")(ack=ack_register_admin, lazy=[process_register_admin])
 
 def ack_q_list(ack):
     ack()
